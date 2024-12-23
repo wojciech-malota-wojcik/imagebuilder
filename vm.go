@@ -1382,7 +1382,7 @@ func netSize(ipNet *net.IPNet) uint32 {
 func isError(err error, expectedError libvirt.ErrorNumber) bool {
 	for err != nil {
 		var e libvirt.Error
-		if ok := errors.As(err, e); ok {
+		if ok := errors.As(err, &e); ok {
 			return e.Code == uint32(expectedError)
 		}
 		err = errors.Unwrap(err)
