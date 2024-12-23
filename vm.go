@@ -1,4 +1,3 @@
-//nolint:dupl,gocyclo,nestif
 package osman
 
 import (
