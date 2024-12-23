@@ -31,7 +31,12 @@ import (
 	"github.com/outofforest/parallel"
 )
 
-const tableNAT = "nat"
+const (
+	osmanTable          = "osman"
+	chainNATPrerouting  = "nat_PREROUTING"
+	chainNATPostrouting = "nat_POSTROUTING"
+	chainNATOutput      = "nat_OUTPUT"
+)
 
 type network struct {
 	Name    string
@@ -126,6 +131,11 @@ func addNetworkToFirewall() error {
 	}
 
 	c := &nftables.Conn{}
+	nfTable, err := ensureNFTable(c)
+	if err != nil {
+		return err
+	}
+
 	chains, err := c.ListChains()
 	if err != nil {
 		return errors.WithStack(err)
@@ -135,59 +145,27 @@ func addNetworkToFirewall() error {
 	for _, ch := range chains {
 		if ch.Table != nil &&
 			ch.Table.Family == nftables.TableFamilyIPv4 &&
+			ch.Table.Name == osmanTable &&
 			ch.Type == nftables.ChainTypeNAT &&
-			ch.Name == "POSTROUTING" {
+			ch.Name == chainNATPostrouting {
 			postroutingChain = ch
 			break
 		}
 	}
 
 	if postroutingChain == nil {
-		var natTable *nftables.Table
-		tables, err := c.ListTables()
-		if err != nil {
-			return errors.WithStack(err)
-		}
-
-		for _, t := range tables {
-			if t.Family == nftables.TableFamilyIPv4 &&
-				t.Name == tableNAT {
-				natTable = t
-				break
-			}
-		}
-
-		if natTable == nil {
-			return errors.New("no nat table")
-		}
-
 		postroutingChain = c.AddChain(&nftables.Chain{
-			Name:     "POSTROUTING",
-			Table:    natTable,
+			Name:     chainNATPostrouting,
+			Table:    nfTable,
 			Type:     nftables.ChainTypeNAT,
 			Hooknum:  nftables.ChainHookPostrouting,
 			Priority: nftables.ChainPriorityNATSource,
 		})
 	}
 
-	osmanPostroutingChain := c.AddChain(&nftables.Chain{
-		Name:  "OSMAN_POSTROUTING",
-		Table: postroutingChain.Table,
-	})
 	c.AddRule(&nftables.Rule{
-		Table: postroutingChain.Table,
+		Table: nfTable,
 		Chain: postroutingChain,
-		Exprs: []expr.Any{
-			&expr.Counter{},
-			&expr.Verdict{
-				Kind:  expr.VerdictJump,
-				Chain: osmanPostroutingChain.Name,
-			},
-		},
-	})
-	c.AddRule(&nftables.Rule{
-		Table: osmanPostroutingChain.Table,
-		Chain: osmanPostroutingChain,
 		Exprs: []expr.Any{
 			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
 			&expr.Cmp{
@@ -267,176 +245,66 @@ func forwardPorts(meta metadata, ip net.IP, buildID types.BuildID) error {
 
 	c := &nftables.Conn{}
 
+	nfTable, err := ensureNFTable(c)
+	if err != nil {
+		return err
+	}
+
 	chains, err := c.ListChains()
 	if err != nil {
 		return errors.WithStack(err)
 	}
 
-	var preroutingChain *nftables.Chain
-	var postroutingChain *nftables.Chain
-	var outputChain *nftables.Chain
-	var osmanPreroutingChain *nftables.Chain
-	var osmanPostroutingChain *nftables.Chain
-	var osmanOutputChain *nftables.Chain
+	var natPreroutingChain *nftables.Chain
+	var natPostroutingChain *nftables.Chain
+	var natOutputChain *nftables.Chain
 	for _, ch := range chains {
-		if ch.Table == nil || ch.Table.Family != nftables.TableFamilyIPv4 {
+		if ch.Table == nil || ch.Table.Name != osmanTable || ch.Table.Family != nftables.TableFamilyIPv4 {
 			continue
 		}
 		switch ch.Name {
-		case "PREROUTING":
+		case chainNATPrerouting:
 			if ch.Type == nftables.ChainTypeNAT {
-				preroutingChain = ch
+				natPreroutingChain = ch
 			}
-		case "POSTROUTING":
+		case chainNATPostrouting:
 			if ch.Type == nftables.ChainTypeNAT {
-				postroutingChain = ch
+				natPostroutingChain = ch
 			}
-		case "OUTPUT":
+		case chainNATOutput:
 			if ch.Type == nftables.ChainTypeNAT {
-				outputChain = ch
+				natOutputChain = ch
 			}
-		case "OSMAN_PREROUTING":
-			osmanPreroutingChain = ch
-		case "OSMAN_POSTROUTING":
-			osmanPostroutingChain = ch
-		case "OSMAN_OUTPUT":
-			osmanOutputChain = ch
 		}
 	}
 
-	if osmanPreroutingChain == nil {
-		if preroutingChain == nil {
-			var natTable *nftables.Table
-			tables, err := c.ListTables()
-			if err != nil {
-				return errors.WithStack(err)
-			}
-
-			for _, t := range tables {
-				if t.Family == nftables.TableFamilyIPv4 &&
-					t.Name == tableNAT {
-					natTable = t
-					break
-				}
-			}
-
-			if natTable == nil {
-				return errors.New("no nat table")
-			}
-
-			preroutingChain = c.AddChain(&nftables.Chain{
-				Name:     "PREROUTING",
-				Table:    natTable,
-				Type:     nftables.ChainTypeNAT,
-				Hooknum:  nftables.ChainHookPrerouting,
-				Priority: nftables.ChainPriorityNATDest,
-			})
-		}
-
-		osmanPreroutingChain = c.AddChain(&nftables.Chain{
-			Name:  "OSMAN_PREROUTING",
-			Table: preroutingChain.Table,
-		})
-		c.AddRule(&nftables.Rule{
-			Table: preroutingChain.Table,
-			Chain: preroutingChain,
-			Exprs: []expr.Any{
-				&expr.Counter{},
-				&expr.Verdict{
-					Kind:  expr.VerdictJump,
-					Chain: osmanPreroutingChain.Name,
-				},
-			},
+	if natPreroutingChain == nil {
+		natPreroutingChain = c.AddChain(&nftables.Chain{
+			Name:     chainNATPrerouting,
+			Table:    nfTable,
+			Type:     nftables.ChainTypeNAT,
+			Hooknum:  nftables.ChainHookPrerouting,
+			Priority: nftables.ChainPriorityNATDest,
 		})
 	}
-	if osmanPostroutingChain == nil {
-		if postroutingChain == nil {
-			var natTable *nftables.Table
-			tables, err := c.ListTables()
-			if err != nil {
-				return errors.WithStack(err)
-			}
 
-			for _, t := range tables {
-				if t.Family == nftables.TableFamilyIPv4 &&
-					t.Name == tableNAT {
-					natTable = t
-					break
-				}
-			}
-
-			if natTable == nil {
-				return errors.New("no nat table")
-			}
-
-			postroutingChain = c.AddChain(&nftables.Chain{
-				Name:     "POSTROUTING",
-				Table:    natTable,
-				Type:     nftables.ChainTypeNAT,
-				Hooknum:  nftables.ChainHookPostrouting,
-				Priority: nftables.ChainPriorityNATSource,
-			})
-		}
-
-		osmanPostroutingChain = c.AddChain(&nftables.Chain{
-			Name:  "OSMAN_POSTROUTING",
-			Table: postroutingChain.Table,
-		})
-		c.AddRule(&nftables.Rule{
-			Table: postroutingChain.Table,
-			Chain: postroutingChain,
-			Exprs: []expr.Any{
-				&expr.Counter{},
-				&expr.Verdict{
-					Kind:  expr.VerdictJump,
-					Chain: osmanPostroutingChain.Name,
-				},
-			},
+	if natPostroutingChain == nil {
+		natPostroutingChain = c.AddChain(&nftables.Chain{
+			Name:     chainNATPostrouting,
+			Table:    nfTable,
+			Type:     nftables.ChainTypeNAT,
+			Hooknum:  nftables.ChainHookPostrouting,
+			Priority: nftables.ChainPriorityNATSource,
 		})
 	}
-	if osmanOutputChain == nil {
-		if outputChain == nil {
-			var natTable *nftables.Table
-			tables, err := c.ListTables()
-			if err != nil {
-				return errors.WithStack(err)
-			}
 
-			for _, t := range tables {
-				if t.Family == nftables.TableFamilyIPv4 &&
-					t.Name == tableNAT {
-					natTable = t
-					break
-				}
-			}
-
-			if natTable == nil {
-				return errors.New("no nat table")
-			}
-
-			outputChain = c.AddChain(&nftables.Chain{
-				Name:     "OUTPUT",
-				Table:    natTable,
-				Type:     nftables.ChainTypeNAT,
-				Hooknum:  nftables.ChainHookOutput,
-				Priority: nftables.ChainPriorityNATSource,
-			})
-		}
-
-		osmanOutputChain = c.AddChain(&nftables.Chain{
-			Name:  "OSMAN_OUTPUT",
-			Table: outputChain.Table,
-		})
-		c.AddRule(&nftables.Rule{
-			Table: outputChain.Table,
-			Chain: outputChain,
-			Exprs: []expr.Any{
-				&expr.Counter{},
-				&expr.Verdict{
-					Kind:  expr.VerdictJump,
-					Chain: osmanOutputChain.Name,
-				},
-			},
+	if natOutputChain == nil {
+		natOutputChain = c.AddChain(&nftables.Chain{
+			Name:     chainNATOutput,
+			Table:    nfTable,
+			Type:     nftables.ChainTypeNAT,
+			Hooknum:  nftables.ChainHookOutput,
+			Priority: nftables.ChainPriorityNATSource,
 		})
 	}
 
@@ -457,8 +325,8 @@ func forwardPorts(meta metadata, ip net.IP, buildID types.BuildID) error {
 
 		// Forwarding traffic incoming requests.
 		c.AddRule(&nftables.Rule{
-			Table:    osmanPreroutingChain.Table,
-			Chain:    osmanPreroutingChain,
+			Table:    nfTable,
+			Chain:    natPreroutingChain,
 			UserData: []byte(buildID),
 			Exprs: []expr.Any{
 				&expr.Payload{
@@ -509,8 +377,8 @@ func forwardPorts(meta metadata, ip net.IP, buildID types.BuildID) error {
 
 		// forwarding traffic outgoing from the host machine
 		c.AddRule(&nftables.Rule{
-			Table:    osmanOutputChain.Table,
-			Chain:    osmanOutputChain,
+			Table:    nfTable,
+			Chain:    natOutputChain,
 			UserData: []byte(buildID),
 			Exprs: []expr.Any{
 				&expr.Payload{
@@ -561,8 +429,8 @@ func forwardPorts(meta metadata, ip net.IP, buildID types.BuildID) error {
 
 		// forwarding traffic coming from the osman network (loop)
 		c.AddRule(&nftables.Rule{
-			Table:    osmanPostroutingChain.Table,
-			Chain:    osmanPostroutingChain,
+			Table:    nfTable,
+			Chain:    natPostroutingChain,
 			UserData: []byte(buildID),
 			Exprs: []expr.Any{
 				&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
@@ -1517,4 +1385,30 @@ func defaultIface() (string, error) {
 func ipToMAC(ip net.IP) string {
 	const template = "00:01:%02x:%02x:%02x:%02x"
 	return fmt.Sprintf(template, ip[0], ip[1], ip[2], ip[3])
+}
+
+func ensureNFTable(c *nftables.Conn) (*nftables.Table, error) {
+	var nfTable *nftables.Table
+	tables, err := c.ListTables()
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	for _, t := range tables {
+		if t.Family == nftables.TableFamilyIPv4 &&
+			t.Name == osmanTable {
+			nfTable = t
+			break
+		}
+	}
+
+	if nfTable == nil {
+		nfTable = &nftables.Table{
+			Name:   osmanTable,
+			Family: nftables.TableFamilyIPv4,
+		}
+		c.AddTable(nfTable)
+	}
+
+	return nfTable, nil
 }
