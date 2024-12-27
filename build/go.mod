@@ -3,8 +3,8 @@ module build
 go 1.22.0
 
 require (
-	github.com/outofforest/build/v2 v2.3.0
-	github.com/outofforest/tools v1.0.7
+	github.com/outofforest/build/v2 v2.4.0
+	github.com/outofforest/tools v1.2.0
 )
 
 require (
@@ -16,8 +16,9 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/samber/lo v1.47.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/ulikunitz/xz v0.5.12 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/mod v0.21.0 // indirect
-	golang.org/x/text v0.18.0 // indirect
+	golang.org/x/mod v0.22.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 )
